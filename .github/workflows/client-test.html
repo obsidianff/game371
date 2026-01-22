@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Crash Game Client Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background-color: #2a2a2a;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #444;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        .status.connected { background-color: #2d5a2d; }
+        .status.disconnected { background-color: #5a2d2d; }
+        .status.authenticated { background-color: #2d4a5a; }
+        .status.error { background-color: #5a2d2d; }
+        
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background-color: #45a049; }
+        button:disabled { 
+            background-color: #666; 
+            cursor: not-allowed; 
+        }
+        
+        input, select {
+            padding: 8px;
+            margin: 5px;
+            border-radius: 4px;
+            border: 1px solid #666;
+            background-color: #333;
+            color: white;
+        }
+        
+        .log {
+            background-color: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 10px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        
+        .game-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        .info-card {
+            background-color: #333;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .multiplier {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        
+        .crashed {
+            color: #f44336;
+        }
+        
+        .bets-list, .cashouts-list {
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        
+        .bet-item, .cashout-item {
+            padding: 5px;
+            border-bottom: 1px solid #333;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎮 WebSocket Crash Game Client Test</h1>
+    
+    <div class="container">
+        <div class="panel">
+            <h3>Connection & Authentication</h3>
+            
+            <div>
+                <label>Server URL:</label>
+                <input type="text" id="serverUrl" value="ws://localhost:3000" style="width: 200px;">
+            </div>
+            
+            <div>
+                <label>Activity:</label>
+                <input type="number" id="activity" value="30" min="1" max="100">
+            </div>
+            
+            <div>
+                <label>Account:</label>
+                <input type="number" id="account" value="123456789" min="100000000" max="999999999">
+            </div>
+            
+            <div>
+                <button id="connectBtn" onclick="connect()">Connect</button>
+                <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+                <button onclick="clearLog()">Clear Log</button>
+            </div>
+            
+            <div id="connectionStatus" class="status disconnected">Disconnected</div>
+            
+            <h4>Message Log</h4>
+            <div id="messageLog" class="log"></div>
+        </div>
+        
+        <div class="panel">
+            <h3>Game State</h3>
+            
+            <div class="game-info">
+                <div class="info-card">
+                    <div>Round ID</div>
+                    <div id="roundId">-</div>
+                </div>
+                <div class="info-card">
+                    <div>Game Phase</div>
+                    <div id="gamePhase">-</div>
+                </div>
+                <div class="info-card">
+                    <div>Current Multiplier</div>
+                    <div id="currentMultiplier" class="multiplier">1.00x</div>
+                </div>
+                <div class="info-card">
+                    <div>Total Bets</div>
+                    <div id="totalBets">0</div>
+                </div>
+                <div class="info-card">
+                    <div>Total Bet Amount</div>
+                    <div id="totalBetAmount">0</div>
+                </div>
+                <div class="info-card">
+                    <div>Players Left</div>
+                    <div id="playersLeft">0</div>
+                </div>
+            </div>
+            
+            <h4>Recent Bets</h4>
+            <div id="betsList" class="bets-list"></div>
+            
+            <h4>Recent Cashouts</h4>
+            <div id="cashoutsList" class="cashouts-list"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let heartbeatInterval = null;
+        let gameState = {
+            roundId: null,
+            phase: 'waiting',
+            multiplier: 1.00,
+            totalBets: 0,
+            totalBetAmount: 0,
+            playersLeft: 0,
+            bets: [],
+            cashouts: []
+        };
+
+        function log(message, type = 'info') {
+            const logElement = document.getElementById('messageLog');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.style.color = type === 'error' ? '#f44336' : 
+                                 type === 'success' ? '#4CAF50' : 
+                                 type === 'warning' ? '#ff9800' : '#ffffff';
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            logElement.appendChild(logEntry);
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        function updateStatus(status, className) {
+            const statusElement = document.getElementById('connectionStatus');
+            statusElement.textContent = status;
+            statusElement.className = `status ${className}`;
+        }
+
+        function updateGameState() {
+            document.getElementById('roundId').textContent = gameState.roundId || '-';
+            document.getElementById('gamePhase').textContent = gameState.phase;
+            document.getElementById('currentMultiplier').textContent = `${gameState.multiplier.toFixed(2)}x`;
+            document.getElementById('totalBets').textContent = gameState.totalBets;
+            document.getElementById('totalBetAmount').textContent = gameState.totalBetAmount.toFixed(2);
+            document.getElementById('playersLeft').textContent = gameState.playersLeft;
+            
+            // Update multiplier color
+            const multiplierElement = document.getElementById('currentMultiplier');
+            if (gameState.phase === 'crashed') {
+                multiplierElement.className = 'multiplier crashed';
+            } else {
+                multiplierElement.className = 'multiplier';
+            }
+        }
+
+        function updateBetsList() {
+            const betsElement = document.getElementById('betsList');
+            betsElement.innerHTML = '';
+            gameState.bets.slice(-10).forEach(bet => {
+                const betItem = document.createElement('div');
+                betItem.className = 'bet-item';
+                betItem.textContent = `${bet.u}: ${bet.bet} coins`;
+                betsElement.appendChild(betItem);
+            });
+        }
+
+        function updateCashoutsList() {
+            const cashoutsElement = document.getElementById('cashoutsList');
+            cashoutsElement.innerHTML = '';
+            gameState.cashouts.slice(-10).forEach(cashout => {
+                const cashoutItem = document.createElement('div');
+                cashoutItem.className = 'cashout-item';
+                cashoutItem.textContent = `${cashout.k}x: +${cashout.win} coins`;
+                cashoutsElement.appendChild(cashoutItem);
+            });
+        }
+
+        function connect() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const activity = parseInt(document.getElementById('activity').value);
+            const account = parseInt(document.getElementById('account').value);
+
+            if (!serverUrl || !activity || !account) {
+                log('Please fill in all connection details', 'error');
+                return;
+            }
+
+            try {
+                ws = new WebSocket(serverUrl);
+                
+                ws.onopen = () => {
+                    log('WebSocket connected', 'success');
+                    updateStatus('Connected', 'connected');
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                    
+                    // Send handshake
+                    const handshake = {
+                        protocol: 'json',
+                        version: 1
+                    };
+                    ws.send(JSON.stringify(handshake));
+                    log('Sent handshake: ' + JSON.stringify(handshake));
+                    
+                    // Send authentication after handshake
+                    setTimeout(() => {
+                        const auth = {
+                            type: 1,
+                            target: 'Account',
+                            arguments: [{
+                                activity: activity,
+                                account: account
+                            }],
+                            invocationId: '0'
+                        };
+                        ws.send(JSON.stringify(auth));
+                        log('Sent authentication: ' + JSON.stringify(auth));
+                    }, 100);
+                    
+                    // Start heartbeat
+                    heartbeatInterval = setInterval(() => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 6 }));
+                        }
+                    }, 10000);
+                };
+                
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleMessage(data);
+                    } catch (error) {
+                        log('Failed to parse message: ' + event.data, 'error');
+                    }
+                };
+                
+                ws.onclose = (event) => {
+                    log(`WebSocket closed: ${event.code} - ${event.reason}`, 'warning');
+                    updateStatus('Disconnected', 'disconnected');
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    
+                    if (heartbeatInterval) {
+                        clearInterval(heartbeatInterval);
+                        heartbeatInterval = null;
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    log('WebSocket error: ' + error, 'error');
+                    updateStatus('Error', 'error');
+                };
+                
+            } catch (error) {
+                log('Connection failed: ' + error.message, 'error');
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        }
+
+        function handleMessage(data) {
+            log('Received: ' + JSON.stringify(data));
+            
+            if (data.type === 1 && data.target) {
+                switch (data.target) {
+                    case 'OnRegistration':
+                        if (data.arguments && data.arguments[0]) {
+                            const regData = data.arguments[0];
+                            if (regData.ok) {
+                                updateStatus('Authenticated', 'authenticated');
+                                log('Authentication successful!', 'success');
+                                gameState.roundId = regData.l;
+                                updateGameState();
+                            }
+                        }
+                        break;
+                        
+                    case 'OnStage':
+                        if (data.arguments && data.arguments[0]) {
+                            gameState.roundId = data.arguments[0].l;
+                            gameState.phase = 'stage';
+                            gameState.multiplier = 1.00;
+                            gameState.bets = [];
+                            gameState.cashouts = [];
+                            updateGameState();
+                            updateBetsList();
+                            updateCashoutsList();
+                        }
+                        break;
+                        
+                    case 'OnBetting':
+                        gameState.phase = 'betting';
+                        updateGameState();
+                        break;
+                        
+                    case 'OnBets':
+                        if (data.arguments && data.arguments[0]) {
+                            const betsData = data.arguments[0];
+                            gameState.totalBets = betsData.n || 0;
+                            gameState.totalBetAmount = betsData.bid || 0;
+                            if (betsData.q) {
+                                gameState.bets = betsData.q;
+                                updateBetsList();
+                            }
+                            updateGameState();
+                        }
+                        break;
+                        
+                    case 'OnStart':
+                        gameState.phase = 'flying';
+                        updateGameState();
+                        break;
+                        
+                    case 'OnCashouts':
+                        if (data.arguments && data.arguments[0]) {
+                            const cashoutData = data.arguments[0];
+                            gameState.playersLeft = cashoutData.d || 0;
+                            if (cashoutData.q) {
+                                gameState.cashouts = [...gameState.cashouts, ...cashoutData.q];
+                                updateCashoutsList();
+                            }
+                            updateGameState();
+                        }
+                        break;
+                        
+                    case 'OnCrash':
+                        if (data.arguments && data.arguments[0]) {
+                            gameState.multiplier = data.arguments[0].f || 1.00;
+                            gameState.phase = 'crashed';
+                            updateGameState();
+                            log(`Game crashed at ${gameState.multiplier.toFixed(2)}x!`, 'warning');
+                        }
+                        break;
+                }
+            }
+        }
+
+        function clearLog() {
+            document.getElementById('messageLog').innerHTML = '';
+        }
+
+        // Initialize
+        updateGameState();
+    </script>
+</body>
+</html>
